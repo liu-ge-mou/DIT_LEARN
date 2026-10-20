@@ -1,0 +1,4 @@
+interface:
+  display_name: "跨设备项目接力"
+  short_description: "为不同项目建立跨设备接力流程，恢复进度并检查代码、资料和环境是否齐备"
+  default_prompt: "使用 $project-handoff 检查当前项目，并根据设备、仓库和现有规范建立或执行接力流程。"
