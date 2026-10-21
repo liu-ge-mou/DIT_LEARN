@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -38,19 +39,21 @@ class InspectionTests(unittest.TestCase):
             self.git("add", "file.txt")
             self.git("-c", "core.hooksPath=", "commit", "-m", "base")
 
-    def inspect(self, path=None):
+    def inspect(self, path=None, env=None):
         self.assertTrue(SCRIPT.is_file(), "Read-only project inspector is not implemented")
         result = subprocess.run(
             [sys.executable, str(SCRIPT), "--path", str(path or self.root)],
-            capture_output=True, encoding="utf-8", errors="replace", check=True,
+            capture_output=True, encoding="utf-8", errors="replace", check=True, env=env,
         )
         return json.loads(result.stdout)
 
     def test_non_repository(self):
+        (self.root / "SESSION_HANDOFF.md").write_text("resume here", encoding="utf-8")
         data = self.inspect()
         self.assertFalse(data["is_repository"])
         self.assertTrue(data["git_available"])
         self.assertFalse((self.root / ".git").exists())
+        self.assertIn("SESSION_HANDOFF.md", data["handoff_candidates"])
 
     def test_missing_path(self):
         data = self.inspect(self.root / "missing")
@@ -142,6 +145,69 @@ class InspectionTests(unittest.TestCase):
         data = self.inspect()
         self.assertEqual(data["changes"]["conflicts"], 1)
         self.assertIn("merge", data["in_progress"])
+
+    def test_nested_markers_and_ignored_directories(self):
+        self.initialize()
+        (self.root / "software").mkdir()
+        (self.root / "software" / "requirements.txt").write_text("numpy", encoding="utf-8")
+        (self.root / "SESSION_HANDOFF.md").write_text("existing state", encoding="utf-8")
+        (self.root / "学习任务规划与进度.md").write_text("existing tasks", encoding="utf-8")
+        (self.root / ".gitignore").write_text("cache/\n", encoding="utf-8")
+        (self.root / "cache").mkdir()
+        (self.root / "cache" / "package.json").write_text("{}", encoding="utf-8")
+        data = self.inspect()
+        self.assertIn("software/requirements.txt", data["dependency_markers"])
+        self.assertIn("SESSION_HANDOFF.md", data["handoff_candidates"])
+        self.assertIn("学习任务规划与进度.md", data["handoff_candidates"])
+        self.assertNotIn("cache/package.json", data["dependency_markers"])
+
+    def test_stash_is_reported_without_exposing_contents(self):
+        self.initialize()
+        (self.root / "file.txt").write_text("private work\n", encoding="utf-8")
+        self.git("stash", "push", "-m", "PRIVATE_STASH_MESSAGE")
+        data = self.inspect()
+        self.assertEqual(data["changes"]["total"], 0)
+        self.assertEqual(data["stash_count"], 1)
+        self.assertNotIn("PRIVATE_STASH_MESSAGE", json.dumps(data))
+
+    def test_cached_refs_can_report_divergence(self):
+        self.initialize()
+        base = self.git("rev-parse", "HEAD")
+        self.git("remote", "add", "origin", "https://example.invalid/offline")
+        self.git("update-ref", "refs/remotes/origin/main", base)
+        self.git("branch", "--set-upstream-to=origin/main", "main")
+        (self.root / "file.txt").write_text("local\n", encoding="utf-8")
+        self.git("add", "file.txt")
+        self.git("-c", "core.hooksPath=", "commit", "-m", "local")
+        local = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-b", "remote-side", base)
+        (self.root / "file.txt").write_text("remote\n", encoding="utf-8")
+        self.git("add", "file.txt")
+        self.git("-c", "core.hooksPath=", "commit", "-m", "remote")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("checkout", "main")
+        data = self.inspect()
+        self.assertEqual((data["ahead"], data["behind"]), (1, 1))
+        self.assertEqual(self.git("rev-parse", "HEAD"), local)
+
+    def test_subdirectory_resolves_repository_root(self):
+        self.initialize()
+        nested = self.root / "中文子目录"
+        nested.mkdir()
+        (self.root / "SESSION_HANDOFF.md").write_text("root state", encoding="utf-8")
+        data = self.inspect(nested)
+        self.assertEqual(Path(data["root"]), self.root.resolve())
+        self.assertEqual(Path(data["requested_path"]), nested.resolve())
+        self.assertIn("SESSION_HANDOFF.md", data["handoff_candidates"])
+
+    def test_ambient_git_routing_does_not_redirect_inspection(self):
+        self.initialize()
+        env = os.environ.copy()
+        env["GIT_DIR"] = str(self.root / "nonexistent.git")
+        env["GIT_WORK_TREE"] = str(self.root / "wrong-worktree")
+        data = self.inspect(env=env)
+        self.assertTrue(data["is_repository"])
+        self.assertEqual(Path(data["root"]), self.root.resolve())
 
 
 if __name__ == "__main__":

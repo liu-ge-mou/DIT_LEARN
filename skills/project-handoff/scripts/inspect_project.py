@@ -22,6 +22,7 @@ DEPENDENCIES = (
 )
 HANDOFFS = (
     "docs/STATUS.md", "docs/progress.md", "STATUS.md", "HANDOFF.md",
+    "SESSION_HANDOFF.md", "学习任务规划与进度.md",
     ".workflow/state.json", ".workflow/project.md",
 )
 
@@ -78,6 +79,19 @@ def git_path(root, value):
     return result if result.is_absolute() else root / result
 
 
+def marker_files(root, names, repository=False):
+    """Known candidates only; never read contents or descend ignored directories."""
+    if not repository:
+        return sorted(name for name in names if (root / name).is_file())
+    paths = git(
+        root, "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--",
+        *(":(glob)**/" + name for name in names),
+    )
+    return sorted({
+        name for name in paths.split("\0") if name and (root / name).is_file()
+    })
+
+
 def inspect(path):
     root = Path(path).expanduser().resolve()
     data = {
@@ -90,6 +104,11 @@ def inspect(path):
     if not root.is_dir():
         data["error"] = "path_not_directory"
         return data
+    data["instruction_scope"] = "root_only_check_ancestors_and_target_separately"
+    data["candidate_scope"] = "known_names_at_requested_root"
+    data["instruction_files"] = marker_files(root, ("AGENTS.md", "AGENTS.override.md"))
+    data["dependency_markers"] = marker_files(root, DEPENDENCIES)
+    data["handoff_candidates"] = marker_files(root, HANDOFFS)
     if not data["git_available"]:
         data["error"] = "git_not_found"
         return data
@@ -118,6 +137,7 @@ def inspect(path):
         ) if any(git_path(root, marker).exists() for marker in markers)
     ]
     data["remotes"] = git(root, "remote").splitlines()
+    data["stash_count"] = len(git(root, "stash", "list", "--format=%gd").splitlines())
     data["upstream"] = git(
         root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}", required=False,
     ) if data["head"] and data["branch"] else None
@@ -128,8 +148,9 @@ def inspect(path):
     data["instruction_files"] = [
         name for name in ("AGENTS.md", "AGENTS.override.md") if (root / name).is_file()
     ]
-    data["dependency_markers"] = [name for name in DEPENDENCIES if (root / name).is_file()]
-    data["handoff_candidates"] = [name for name in HANDOFFS if (root / name).is_file()]
+    data["candidate_scope"] = "known_names_tracked_and_untracked_nonignored_no_submodule_recursion"
+    data["dependency_markers"] = marker_files(root, DEPENDENCIES, repository=True)
+    data["handoff_candidates"] = marker_files(root, HANDOFFS, repository=True)
     data["cloud_folder_hint"] = any(
         part.lower() == "dropbox" or part.lower().startswith("onedrive") for part in root.parts
     )
